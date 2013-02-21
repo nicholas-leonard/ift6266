@@ -1,8 +1,6 @@
 import sys
 from contest_dataset import ContestDataset
 
-from main import Tanh
-
 def usage():
     print """usage: python make_submission.py model.pkl submission.csv
 Where model.pkl contains a trained pylearn2.models.mlp.MLP object.
