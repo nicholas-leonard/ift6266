@@ -1,5 +1,6 @@
 import sys
 from contest_dataset import ContestDataset
+from pylearn2.datasets.preprocessing import Standardize
 
 def usage():
     print """usage: python make_submission.py model.pkl submission.csv
@@ -31,7 +32,7 @@ except Exception, e:
 
 dataset = ContestDataset(which_set='public_test',
             base_path = '../data',
-            preprocessor = None)
+            preprocessor = Standardize())
 
 dataset = dataset.get_test_set()
 

@@ -411,3 +411,37 @@ VALUES 	(7, 3, 7, 1, 64, 1),
 --0.701172;35;5;3;3;32;"rectifiedlinear";"rectified1";1500;0.2;"rectifiedlinear";"rectified2";1500;0.5
 INSERT INTO hps.config (model_id, ext_id, train_id, dataset_id, batch_size, experiment_id)
 VALUES 	(5, 3, 4, 1, 64, 1),
+
+--old
+INSERT INTO hps.experiment (experiment_desc)
+VALUES ('tried rectified linear with 4000 and 5000 weights, and explored different measures of sparseness')
+RETURNING experiment_id--4
+
+INSERT INTO hps.experiment (experiment_desc)
+VALUES ('fixed an error: generating best model')
+RETURNING experiment_id--5
+
+--best rectified linear 5000 dim: trying new init patterns:
+
+INSERT INTO hps.experiment (experiment_desc)
+VALUES ('grid search on batch_sizes, training algorithms (momentums) and models (normal initialization with different init biases)')
+RETURNING experiment_id--6
+
+INSERT INTO hps.config (model_id, train_id, dataset_id, batch_size, experiment_id) (
+	SELECT model_id,train_id,1,batch_size,6
+	FROM ( SELECT generate_series(20,31) AS model_id ) AS a,
+		( SELECT unnest('{16,19,18}'::INT4[]) AS train_id) AS b,
+	     ( SELECT unnest('{16,64,256}'::INT4[]) AS batch_size ) AS c
+);
+
+--uses prior knowledge (conv net):
+
+INSERT INTO hps.experiment (experiment_desc)
+VALUES ('grid search on conv net with 1 convrectlinear layer (kernel shape, output channels, max_norm) and a softmax output, training algorithms (momentums and learning rates)')
+RETURNING experiment_id--7
+
+INSERT INTO hps.config (model_id, train_id, dataset_id, batch_size, experiment_id) (
+	SELECT model_id,train_id,1,64,7
+	FROM ( SELECT generate_series(32,39) AS model_id ) AS a,
+		( SELECT unnest('{22,23,24,25,26,27}'::INT4[]) AS train_id) AS b
+);

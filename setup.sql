@@ -50,6 +50,20 @@ CREATE TABLE hps.experiment (
 	PRIMARY KEY (experiment_id)
 );
 
+/*CREATE TABLE hps.best_model (
+	experiment_id	INT8,
+	cost_based	BOOLEAN,
+	best_config_id	INT8,
+	best_value	FLOAT4,
+	PRIMARY KEY (experiment_id)
+);*/
+
+CREATE TABLE hps.exp_jump (
+	experiment_id		INT8,
+	next_experiment_id	INT8,
+	PRIMARY KEY (experiment_id)
+);
+
 /* Model : MLP */
 CREATE TABLE hps.model (
 	model_id	SERIAL,
@@ -68,6 +82,19 @@ CREATE TABLE hps.mlp_graph (
 	output_layer_id		INT8,
 	PRIMARY KEY (model_id, input_layer_id, output_layer_id)
 );
+/* Space */
+
+CREATE TABLE hps.space (
+	space_id	SERIAL,
+	space_class	VARCHAR(255),
+	PRIMARY KEY (space_id)
+);
+CREATE TABLE hps.space_conv2DSpace(
+	num_row		INT4 NOT NULL,
+	num_column	INT4 NOT NULL,
+	num_channel	INT4 NOT NULL,
+	PRIMARY KEY (space_id)
+) INHERITS (hps.space);
 
 /* Weight Initializer */
 CREATE TABLE hps.init (
@@ -78,6 +105,12 @@ CREATE TABLE hps.init (
 
 --DROP TABLE hps.init_uniform;
 CREATE TABLE hps.init_uniform (
+	init_range	FLOAT4,
+	PRIMARY KEY(init_id)
+) INHERITS (hps.init);
+
+--DROP TABLE hps.init_uniform;
+CREATE TABLE hps.init_uniformConv2D (
 	init_range	FLOAT4,
 	PRIMARY KEY(init_id)
 ) INHERITS (hps.init);
@@ -213,8 +246,22 @@ CREATE TABLE hps.term_epochcounter (
 	PRIMARY KEY (term_id)
 ) INHERITS (hps.termination);
 
+--DROP TABLE hps.term_monitorbased;
+CREATE TABLE hps.term_monitorbased (
+	proportional_decrease	FLOAT4 DEFAULT 0.01,
+	max_epoch		INT4 DEFAULT 30,
+	channel_name		VARCHAR(255) DEFAULT 'Validation Missclassification',
+	PRIMARY KEY (term_id)
+) INHERITS (hps.termination);
+
+
 --DROP TABLE hps.term_multi;
-CREATE TABLE hps.term_multi (
+CREATE TABLE hps.term_and (
+	term_array	INT8[],
+	PRIMARY KEY (term_id)
+) INHERITS (hps.termination);
+
+CREATE TABLE hps.term_or (
 	term_array	INT8[],
 	PRIMARY KEY (term_id)
 ) INHERITS (hps.termination);
@@ -300,4 +347,15 @@ CREATE TABLE hps.config (
 	end_time	TIMESTAMP,
 	PRIMARY KEY (config_id)
 );
+
+--DROP TABLE hps.training_log;
+CREATE TABLE hps.training_log (
+	config_id	INT8,
+	epoch_count	INT4,
+	channel_name	VARCHAR(255),
+	channel_value	FLOAT4,
+	PRIMARY KEY (config_id, epoch_count, channel_name)
+);
+
+
 
