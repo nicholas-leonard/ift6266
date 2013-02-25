@@ -188,6 +188,23 @@ CREATE TABLE hps.layer_softmaxpool (
 	PRIMARY KEY (layer_id)
 ) INHERITS (hps.layer);
 
+CREATE TABLE hps.layer_maxout (
+	 num_units		INT4,
+	 num_pieces		INT4,
+	 pool_stride 		INT4,
+	 randomize_pools 	BOOLEAN DEFAULT False,
+	 irange 		FLOAT4,
+	 sparse_init 		INT4,
+	 sparse_stdev 		FLOAT4 DEFAULT 1.0,
+	 include_prob 		FLOAT4 DEFAULT 1.0,
+	 init_bias		FLOAT4 DEFAULT 0.,
+	 W_lr_scale 		FLOAT4,
+	 b_lr_scale 		FLOAT4,
+	 max_col_norm 		FLOAT4,
+	 max_row_norm 		FLOAT4,
+	 min_zero		BOOLEAN DEFAULT False
+) INHERITS (hps.layer);
+
 CREATE TABLE hps.layer_ConvRectifiedLinear (
 	output_channels	INT4,
 	kernel_shape1	INT4,

@@ -445,3 +445,49 @@ INSERT INTO hps.config (model_id, train_id, dataset_id, batch_size, experiment_i
 	FROM ( SELECT generate_series(32,39) AS model_id ) AS a,
 		( SELECT unnest('{22,23,24,25,26,27}'::INT4[]) AS train_id) AS b
 );
+
+--trial 3 (conv net):
+
+INSERT INTO hps.experiment (experiment_desc)
+VALUES ('')
+RETURNING experiment_id--
+
+INSERT INTO hps.config (model_id, train_id, dataset_id, batch_size, experiment_id) (
+	SELECT model_id,train_id,1,batch_size,8
+	FROM ( SELECT unnest('{45,46,47,48,49,50}'::INT4[]) AS model_id ) AS a,
+		( SELECT unnest('{30,31,32}'::INT4[]) AS train_id) AS b,
+		( SELECT unnest('{16,64,256}'::INT4[]) AS batch_size) AS c
+);
+
+
+--experiment template (use 2 screens):
+
+
+
+INSERT INTO hps.experiment (experiment_desc)
+VALUES ('')
+RETURNING experiment_id
+
+/* layers */
+
+INSERT INTO hps.layer_rectifiedlinear (
+	dropout_prob,
+	layer_class, layer_name,
+	dim, init_id)
+VALUES (0.2, 'rectifiedlinear', 'rectified1', 2000, 2)
+RETURNING layer_id;--10
+
+INSERT INTO hps.layer_rectifiedlinear (
+	dropout_prob,
+	layer_class, layer_name,
+	dim, init_id)
+VALUES (0.2, 'rectifiedlinear', 'rectified1', 2000, 2)
+RETURNING layer_id;--10
+
+INSERT INTO hps.config (model_id, train_id, dataset_id, batch_size, experiment_id) (
+	SELECT model_id,train_id,1,batch_size,8
+	FROM ( SELECT unnest('{45,46,47,48,49,50}'::INT4[]) AS model_id ) AS a,
+		( SELECT unnest('{30,31,32}'::INT4[]) AS train_id) AS b,
+		( SELECT unnest('{16,64,256}'::INT4[]) AS batch_size) AS c
+);
+

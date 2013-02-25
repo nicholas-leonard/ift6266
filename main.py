@@ -11,8 +11,41 @@ import sys
 from pylearn2.datasets.preprocessing import Standardize
 
 from contest_dataset import ContestDataset
+from pylearn2.datasets.dense_design_matrix import DenseDesignMatrix
+from pylearn2.datasets.dense_design_matrix import DefaultViewConverter
+from pylearn2.monitor import Monitor
+
 from hps import HPS
 
+import numpy as np
+import theano.tensor as T
+from theano import config
+from theano import function
+
+
+class MyHPS(HPS):
+    def get_classification_accuracy(self, model, minibatch, target):
+        
+        patches = []
+        patches.append(minibatch[:,:42,:42])
+        patches.append(minibatch[:,6:,:42])
+        patches.append(minibatch[:,6:,6:])
+        patches.append(minibatch[:,:42,6:])
+        patches.append(minibatch[:,3:45,3:45])
+        for i in xrange(5):
+            mirror_patch = []
+            for j in xrange(42):
+                mirror_patch.append(patches[i][:,:,42-(j+1):42-j])
+            patches.append(T.concatenate(mirror_patch,axis=2))
+        #Y = model.fprop(patches[-1], apply_dropout=False) 
+        Y_list = []
+        for patch in patches:
+            Y_list.append(model.fprop(patch, apply_dropout=False))
+         
+        Y = T.mean(T.stack(Y_list), axis=(1,2))
+        return T.mean(T.cast(T.eq(T.argmax(Y, axis=1), 
+                           T.argmax(target, axis=1)), dtype='int32'),
+                           dtype=config.floatX)
 
 def get_valid_ddm(path='../data'):
     return ContestDataset(which_set='train',
@@ -54,12 +87,18 @@ def validate(model_path):
     
 if __name__ == '__main__':
     if sys.argv[1] == 'train':
-        train_ddm = ContestDataset(which_set='train',
-                    base_path = '../data',
-                    start = 0,
-                    stop = 3584,
-                    preprocessor = Standardize())
-           
+        """train_ddm = ContestDataset(which_set='train',
+                base_path = "../data/",
+                start = 0,
+                stop = 3584,
+                preprocessor = Standardize())"""
+        train_ddm = DenseDesignMatrix(
+                    X=np.load("../data/train_X.npy"),
+                    y=np.load("../data/train_y.npy"),
+                    view_converter = DefaultViewConverter(shape=[42,42,1]))
+        #preprocessor = Standardize()
+        #preprocessor.apply(train_ddm)
+        
         valid_ddm = get_valid_ddm()
         experiment_id = int(sys.argv[2])
         start_config_id = None

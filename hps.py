@@ -29,6 +29,7 @@ from pylearn2.costs.cost import MethodCost, SumOfCosts
 from pylearn2.models.mlp import MLP, ConvRectifiedLinear, RectifiedLinear, \
     Linear, Softmax, Tanh, Sigmoid, SoftmaxPool, Uniform, Normal, Sparse, \
     WeightDecay, UniformConv2D
+from pylear2.models.maxout import Maxout
 from pylearn2.monitor import Monitor
 from pylearn2.space import VectorSpace, Conv2DSpace
 from pylearn2.train_extensions.best_params import MonitorBasedSaveBest
@@ -220,7 +221,7 @@ class HPS:
                                dtype=config.floatX)
     def prep_valtest_monitor(self, model, batch_size):
         minibatch = T.as_tensor_variable(
-                        self.train_ddm.get_batch_topo(batch_size), 
+                        self.valid_ddm.get_batch_topo(batch_size), 
                         name='minibatch'
                     )
         target = T.matrix('target')
@@ -246,7 +247,8 @@ class HPS:
                                 
     def get_trainingAlgorithm(self, train_id, batch_size):
         #TODO add cost to db
-        num_train_batch = self.ntrain/batch_size
+        num_train_batch = (self.ntrain/batch_size)/8
+        print "num training batches:", num_train_batch
         train_class = self.select_trainingAlgorithm(train_id)
         if train_class == 'stochasticgradientdescent':
             (learning_rate, term_id, init_momentum, train_iteration_mode,
@@ -325,7 +327,34 @@ class HPS:
         """Creates a Layer instance from its definition in the database."""
         (layer_class, layer_name, dim, 
          dropout_prob, dropout_scale) = self.select_layer(layer_id)
-        if layer_class == 'linear':
+        if layer_class == 'maxout':
+            (num_units,
+             num_pieces,
+             pool_stride,
+             randomize_pools,
+             irange,
+             sparse_init,
+             sparse_stdev,
+             include_prob,
+             init_bias,
+             W_lr_scale,
+             b_lr_scale,
+             max_col_norm,
+             max_row_norm) = self.select_layer_maxout(layer_id)
+            layer = Maxout(num_units,
+                             num_pieces,
+                             pool_stride,
+                             randomize_pools,
+                             irange,
+                             sparse_init,
+                             sparse_stdev,
+                             include_prob,
+                             init_bias,
+                             W_lr_scale,
+                             b_lr_scale,
+                             max_col_norm,
+                             max_row_norm)
+        elif layer_class == 'linear':
             (init_id, init_bias, 
              W_lr_scale, b_lr_scale, 
              max_row_norm, max_col_norm) = self.select_layer_linear(layer_id)
@@ -769,6 +798,27 @@ class HPS:
         """, (layer_id,), self.db.FETCH_ONE)
         if not row or row is None:
             raise HPSData("No linear layer for layer_id="+str(layer_id))
+        return row
+    def select_layer_maxout(self, layer_id):
+        row = self.db.executeSQL("""
+        SELECT   num_units,
+                 num_pieces,
+                 pool_stride,
+                 randomize_pools,
+                 irange,
+                 sparse_init,
+                 sparse_stdev,
+                 include_prob,
+                 init_bias,
+                 W_lr_scale,
+                 b_lr_scale,
+                 max_col_norm,
+                 max_row_norm
+        FROM hps.layer_maxout
+        WHERE layer_id = %s
+        """, (layer_id,), self.db.FETCH_ONE)
+        if not row or row is None:
+            raise HPSData("No maxout layer for layer_id="+str(layer_id))
         return row
     def select_layer_softmax(self, layer_id):
         row = self.db.executeSQL("""
