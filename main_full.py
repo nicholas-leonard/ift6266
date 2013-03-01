@@ -22,7 +22,7 @@ import theano.tensor as T
 def get_valid_ddm(path='../data'):
     return ContestDataset(which_set='train',
                 base_path = path,
-                start = 3584,
+                start = 4032,
                 stop = 4096,
                 preprocessor = Standardize(),
                 fit_preprocessor = True)
@@ -57,7 +57,7 @@ if __name__ == '__main__':
         train_ddm = ContestDataset(which_set='train',
                 base_path = "../data/",
                 start = 0,
-                stop = 3584,
+                stop = 4032,
                 preprocessor = Standardize(),
                 fit_preprocessor = True)
         #preprocessor = Standardize()
