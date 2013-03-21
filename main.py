@@ -25,7 +25,8 @@ def get_valid_ddm(path='../data'):
                 start = 3584,
                 stop = 4096,
                 preprocessor = Standardize(),
-                fit_preprocessor = True)
+                fit_preprocessor = True,
+                axes = ('c', 0, 1, 'b'))
                 
 def validate(model_path):
     from pylearn2.utils import serial
@@ -59,7 +60,8 @@ if __name__ == '__main__':
                 start = 0,
                 stop = 3584,
                 preprocessor = Standardize(),
-                fit_preprocessor = True)
+                fit_preprocessor = True,
+                axes = ('c', 0, 1, 'b'))
         #preprocessor = Standardize()
         #preprocessor.apply(train_ddm)
         

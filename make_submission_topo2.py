@@ -1,6 +1,7 @@
 import sys
 from contest_dataset import ContestDataset
 from pylearn2.datasets.preprocessing import Standardize
+from theano import tensor as T
 
 def usage():
     print """usage: python make_submission.py model.pkl submission.csv
@@ -33,13 +34,12 @@ except Exception, e:
 dataset = ContestDataset(which_set='public_test',
             base_path = '../data',
             preprocessor = Standardize(),
-            fit_preprocessor = True,
-            axes = ('c', 0, 1, 'b'))
+            fit_preprocessor = True)
 
 dataset = dataset.get_test_set()
 
 # use smallish batches to avoid running out of memory
-batch_size = 100
+batch_size = 64
 model.set_batch_size(batch_size)
 # dataset must be multiple of batch size of some batches will have
 # different sizes. theano convolution requires a hard-coded batch size
@@ -52,11 +52,30 @@ if extra > 0:
     dtype=dataset.X.dtype)), axis=0)
 assert dataset.X.shape[0] % batch_size == 0
 
-
 X = model.get_input_space().make_batch_theano()
-Y = model.fprop(X, apply_dropout=False)
-
-from theano import tensor as T
+patches = []
+patches.append(X[:,:42,:42,:])
+patches.append(X[:,6:,:42,:])
+patches.append(X[:,6:,6:,:])
+patches.append(X[:,:42,6:,:])
+patches.append(X[:,3:45,3:45,:])
+"""for i in xrange(5):
+    mirror_patch = []
+    for j in xrange(42):
+        mirror_patch.append(patches[i][:,:,42-(j+1):42-j,:])
+    patches.append(T.concatenate(mirror_patch,axis=2))"""
+   
+"""for patch in patches:
+    Y_list.append(model.fprop(patch, apply_dropout=False))
+ 
+Y = T.mean(T.stack(Y_list), axis=(1,2))"""
+Y = model.fprop(patches[-1], apply_dropout=False) 
+i = 1
+for patch in patches[:-1]:
+    Y = Y + model.fprop(patch, apply_dropout=False)
+    i+=1
+print i
+Y = Y/float(i)
 
 y = T.argmax(Y, axis=1)
 

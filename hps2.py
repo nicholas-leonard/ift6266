@@ -241,11 +241,13 @@ class HPS:
                                dtype=config.floatX)
     def prep_valtest_monitor(self, model, batch_size):
         if self.topo_view:
+            print "topo view"
             minibatch = T.as_tensor_variable(
                             self.valid_ddm.get_batch_topo(batch_size), 
                             name='minibatch'
                         )
         else:
+            print "design view"
             minibatch = T.as_tensor_variable(
                             self.valid_ddm.get_batch_design(batch_size), 
                             name='minibatch'
@@ -384,12 +386,12 @@ class HPS:
                 irange	,init_bias,W_lr_scale,b_lr_scale,pad,fix_pool_shape,
                 fix_pool_stride,fix_kernel_shape,partial_sum,tied_b,
                 max_kernel_norm,input_normalization,output_normalization) \
-                    = self.select_layer_convrectifiedlinear(layer_id) 
+                    = self.select_layer_maxoutConvC01B(layer_id) 
             return MaxoutConvC01B(layer_name=layer_name,
                                   num_channels=num_channels,
                                   num_pieces=num_pieces,
                                   kernel_shape=(kernel_width,kernel_width),
-                                  pool_width=(pool_width, pool_width),
+                                  pool_shape=(pool_width, pool_width),
                                   pool_stride=(pool_stride,pool_stride),
                                   irange=irange,init_bias=init_bias,
                                   W_lr_scale=W_lr_scale,
@@ -402,10 +404,11 @@ class HPS:
                                   input_normalization=input_normalization,
                                   output_normalization=output_normalization)
         elif layer_class == 'sigmoid':
-            (dim,irange,sparse_init,sparse_stdev,include_prob,init_bias,
+            (dim,irange,istdev,sparse_init,sparse_stdev,include_prob,init_bias,
                 W_lr_scale,b_lr_scale,max_col_norm,max_row_norm) \
                     = self.select_layer_sigmoid(layer_id)
             return Sigmoid(layer_name=layer_name,dim=dim,irange=irange,
+                           istdev=istdev,
                            sparse_init=sparse_init,sparse_stdev=sparse_stdev,
                            include_prob=include_prob,init_bias=init_bias,
                            W_lr_scale=W_lr_scale,b_lr_scale=b_lr_scale,
@@ -437,10 +440,15 @@ class HPS:
     def get_space(self, space_id):
         space_class = self.select_space(space_id)
         if space_class == 'conv2dspace':
-            (num_row, num_column, num_channels) \
+            (num_row, num_column, num_channels, axes_char) \
                 = self.select_space_conv2DSpace(space_id)
+            if axes_char == 'b01c':
+                axes = ('b', 0, 1, 'c')
+            elif axes_char == 'c01b':
+                axes = ('c', 0, 1, 'b')
+            print axes
             return Conv2DSpace(shape=(num_row, num_column), 
-                               num_channels=num_channels)
+                               num_channels=num_channels, axes=axes)
         else:
             raise HPSData("Space class not supported:"+str(space_class))
     def get_extensions(self, ext_array, config_id):
@@ -515,7 +523,7 @@ class HPS:
         return row[0]
     def select_space_conv2DSpace(self, space_id):
         row = self.db.executeSQL("""
-        SELECT num_row, num_column, num_channel
+        SELECT num_row, num_column, num_channel, axes
         FROM hps2.space_conv2DSpace
         WHERE space_id = %s
         """, (space_id,), self.db.FETCH_ONE)
@@ -689,7 +697,7 @@ class HPS:
         return row
     def select_layer_sigmoid(self, layer_id):
         row = self.db.executeSQL("""
-        SELECT  dim,irange,sparse_init,sparse_stdev,include_prob,init_bias,
+        SELECT  dim,irange,istdev,sparse_init,sparse_stdev,include_prob,init_bias,
                 W_lr_scale,b_lr_scale,max_col_norm,max_row_norm
         FROM hps2.layer_sigmoid
         WHERE layer_id = %s

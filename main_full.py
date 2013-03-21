@@ -25,7 +25,8 @@ def get_valid_ddm(path='../data'):
                 start = 4032,
                 stop = 4096,
                 preprocessor = Standardize(),
-                fit_preprocessor = True)
+                fit_preprocessor = True,
+                axes = ('c', 0, 1, 'b'))
                 
 def validate(model_path):
     from pylearn2.utils import serial
@@ -59,7 +60,8 @@ if __name__ == '__main__':
                 start = 0,
                 stop = 4032,
                 preprocessor = Standardize(),
-                fit_preprocessor = True)
+                fit_preprocessor = True,
+                axes = ('c', 0, 1, 'b'))
         #preprocessor = Standardize()
         #preprocessor.apply(train_ddm)
         
@@ -71,7 +73,7 @@ if __name__ == '__main__':
         log_channel_names = ['train_output_misclass',
                             'Validation Classification Accuracy']
         mbsb_channel_name = 'Validation Missclassification'
-        hps = HPS(dataset_name = "Emotion Recognition",
+        hps = HPS(dataset_name = "Emotion Recognition Full",
                   task_id = task_id, 
                   train_ddm = train_ddm, 
                   valid_ddm = valid_ddm, 
