@@ -5,7 +5,7 @@ Created on Wed Feb 13 19:56:19 2013
 @author: Nicholas Léonard
 """
 
-import time
+import time, sys
 
 from pylearn2.utils import serial
 import theano.tensor as T
@@ -13,27 +13,72 @@ from theano import config
 import numpy as np
 from theano import function
 
-#from pylearn2.utils.iteration import (
-#    FiniteDatasetIterator,
-#    resolve_iterator_class
-#)
-
-#from pylearn2.datasets.dense_design_matrix import DenseDesignMatrix
-
 from pylearn2.training_algorithms.sgd import SGD, MomentumAdjustor
 from pylearn2.termination_criteria import MonitorBased, And, EpochCounter
 from pylearn2.train import Train
 from pylearn2.costs.cost import MethodCost, SumOfCosts
-from pylearn2.models.mlp import MLP, ConvRectifiedLinear, RectifiedLinear, \
-    Softmax, WeightDecay, Sigmoid
+from pylearn2.costs.mlp import WeightDecay
+from pylearn2.models.mlp import MLP, ConvRectifiedLinear, \
+    RectifiedLinear, Softmax, Sigmoid, Linear
 from pylearn2.models.maxout import Maxout, MaxoutConvC01B
 from pylearn2.monitor import Monitor
 from pylearn2.space import VectorSpace, Conv2DSpace
 from pylearn2.train_extensions.best_params import MonitorBasedSaveBest
-#from pylearn2.datasets.preprocessing import Standardize
 from pylearn2.train_extensions import TrainExtension
+from pylearn2.datasets import preprocessing as pp
+from pylearn2.datasets.cifar100 import CIFAR100
 
 from database import DatabaseHandler
+from mixture import Mixture, Gater, KmeansGater, KmeansCost, \
+    StarMixture, MixtureCost, Convolution
+    
+    
+class MLPCost(Cost):
+    supervised = True
+    def __init__(self, cost_type='default', missing_target_value=None):
+        self.__dict__.update(locals())
+        del self.self
+    
+    def setup_dropout(default_input_include_prob=.5, input_scales=None,
+            input_include_probs=None, default_input_scale=2.):
+        """
+        During training, each input to each layer is randomly included or excluded
+        for each example. The probability of inclusion is independent for each input
+        and each example. Each layer uses "default_input_include_prob" unless that
+        layer's name appears as a key in input_include_probs, in which case the input
+        inclusion probability is given by the corresponding value.
+
+        Each feature is also multiplied by a scale factor. The scale factor for each
+        layer's input scale is determined by the same scheme as the input probabilities.
+        """
+
+        if input_include_probs is None:
+            input_include_probs = {}
+
+        if input_scales is None:
+            input_scales = {}
+
+        self.__dict__.update(locals())
+        del self.self
+        
+        self.use_dropout=True
+
+    def __call__(self, model, X, Y, ** kwargs):
+        if self.use_dropout:
+            Y_hat = model.dropout_fprop(X, default_input_include_prob=self.default_input_include_prob,
+                    input_include_probs=self.input_include_probs, default_input_scale=self.default_input_scale,
+                    input_scales=self.input_scales
+                    )
+        else:
+            Y_hat = model.fprop(X)
+        
+        if missing_target_value is not None:
+            costMatrix = model.layers[-1].cost_matrix(Y, Y_hat)
+            costMatrix *= T.neq(Y, -1)  # This sets to zero all elements where Y == -1
+            cost = model.cost_from_cost_matrix(costMatrix)
+        else:
+            cost = model.cost(Y, Y_hat)
+        return cost
 
 class ExponentialDecayOverEpoch(TrainExtension):
     """
@@ -69,12 +114,11 @@ class ExponentialDecayOverEpoch(TrainExtension):
 
 """
 TODO:
-    add affineless softmax layer for Ian
-    add preprocessing
-    add worker_id to log (get from sequence)
     saves best model on disk. At end of experiment, saves best model
-    to database as blob.
+        to database as blob.
     make configuration Class 
+    replace select functions with get(refactor object creation to these)
+    dropout is still a problem
 """
 
 class HPSModelPersist(TrainExtension):
@@ -128,8 +172,8 @@ class HPSLog(TrainExtension):
         
     def set_training_log(self, channel_name, channel_value):
         self.db.executeSQL("""
-        INSERT INTO hps2.training_log (config_id, epoch_count, channel_name, 
-                                      channel_value)
+        INSERT INTO hps2.training_log (config_id, epoch_count, 
+                                        channel_name, channel_value)
         VALUES (%s, %s, %s, %s)
         """, 
         (self.config_id, self.epoch_count, channel_name, channel_value),
@@ -154,91 +198,89 @@ class HPS:
     For now, I just use it instead of the jobman database to try various 
     hyperparameter configurations.
     
+    Curriculum:
+        start with random jobs for very few epochs (30) each. 
     """
     def __init__(self, 
-                 dataset_name,
+                 worker_name,
                  task_id,
-                 train_ddm, valid_ddm, 
                  log_channel_names,
-                 test_ddm = None,
                  save_prefix = "model_",
-                 mbsb_channel_name = None):
-        self.dataset_name = dataset_name
+                 mbsb_channel_name = None,
+                 cache_dataset = True):
+                 
+        self.worker_name = worker_name
+        self.cache_dataset = cache_dataset
         self.task_id = task_id
-        
-        self.train_ddm = train_ddm
-        self.valid_ddm = valid_ddm
-        self.test_ddm = test_ddm
-        self.monitoring_dataset = {'train': train_ddm}
-        
-        self.nvis = self.train_ddm.get_design_matrix().shape[1]
-        self.nout = self.train_ddm.get_targets().shape[1]
-        self.ntrain = self.train_ddm.get_design_matrix().shape[0]
-        self.nvalid = self.valid_ddm.get_design_matrix().shape[0]
-        self.ntest = 0
-        if self.test_ddm is not None:
-            self.ntest = self.test_ddm.get_design_matrix().shape[0]
+        self.dataset_cache = {}
         
         self.log_channel_names = log_channel_names
         self.save_prefix = save_prefix
         # TODO store this in data for each experiment or dataset
         self.mbsb_channel_name = mbsb_channel_name
         
-        print "nvis, nout :", self.nvis, self.nout
-        print "ntrain :", self.ntrain
-        print "nvalid :", self.nvalid
+        self.db = DatabaseHandler()
         
     def run(self, start_config_id = None):
-        self.db = DatabaseHandler()
         print 'running'
         while True:
-            
             (config_id, config_class, model, learner, algorithm) \
                 = self.get_config(start_config_id)
             start_config_id = None
-            print 'learning'     
-            learner.main_loop()
-            
+            print 'learning'
+            try:     
+                learner.main_loop()
+            except Exception, e:
+                print e
             self.set_end_time(config_id)
+            
     def get_config(self, start_config_id = None):
         if start_config_id is not None:
-            (config_id,config_class,random_seed,ext_array) \
-                = self.select_config(start_config_id)
+            (config_id,config_class,random_seed,ext_array,dataset_id) \
+                    = self.select_config(start_config_id)
         else:
-            (config_id,config_class,random_seed,ext_array) \
-                = self.select_next_config()
-        # model (could also return Cost)
-        (weight_decay, model, batch_size) \
-            = self.get_model(config_id, config_class)
+            (config_id,config_class,random_seed,ext_array,dataset_id) \
+                    = self.select_next_config()
+
+        # dataset
+        self.load_dataset(dataset_id)
+        
+        # model
+        (model, batch_size) = self.get_model(config_id, config_class)
+            
+        # cost
+        cost = self.get_cost(config_id, config_class)
         
         # prepare monitor
         self.prep_valtest_monitor(model, batch_size)
         
         # extensions
         extensions = self.get_extensions(ext_array, config_id)
-        
-        costs = [MethodCost(method='cost_from_X', supervised=True)]
-        if weight_decay is not None:
-            costs.append(WeightDecay(coeffs=weight_decay))
-        if len(costs) > 1:
-            cost = SumOfCosts(costs)
-        else:
-            cost = costs[0]
     
         # training algorithm
-        algorithm = self.get_trainingAlgorithm(config_id, config_class, cost)
+        algorithm \
+            = self.get_trainingAlgorithm(config_id, config_class, cost)
         
-        print 'sgd complete'
+        # learner 
         learner = Train(dataset=self.train_ddm,
                         model=model,
                         algorithm=algorithm,
                         extensions=extensions)
+                        
         return (config_id, config_class, model, learner, algorithm)
+                
+    def apply_preprocess(self):
+        self.preprocessor.apply(self.train_ddm, can_fit=True)
+        self.preprocessor.apply(self.valid_ddm, can_fit=False)
+        if self.test_ddm is not None:
+            self.preprocessor.apply(self.test_ddm, can_fit=False)
+            
     def get_classification_accuracy(self, model, minibatch, target):
         Y = model.fprop(minibatch, apply_dropout=False)
         return T.mean(T.cast(T.eq(T.argmax(Y, axis=1), 
-                               T.argmax(target, axis=1)), dtype='int32'),
-                               dtype=config.floatX)
+                           T.argmax(target, axis=1)), dtype='int32'),
+                           dtype=config.floatX)
+                           
     def prep_valtest_monitor(self, model, batch_size):
         if self.topo_view:
             print "topo view"
@@ -273,6 +315,105 @@ class HPS:
                                 Accuracy,
                                 self.test_ddm)
                                 
+    def load_dataset(self, dataset_id):
+        if dataset_id in self.dataset_cache:
+            # if cached, load from cache
+            (train_ddm, valid_ddm, test_ddm) \
+                = self.dataset_cache[dataset_id]
+            self.train_ddm = train_ddm
+            self.valid_ddm = valid_ddm
+            self.test_ddm = test_ddm
+        else:
+            (preprocess_array,train_ddm_id,valid_ddm_id,test_ddm_id) \
+                = self.select_dataset(dataset_id)
+            # preprocessing
+            self.load_preprocessor(preprocess_array)
+            # dense design matrices
+            self.train_ddm = self.get_ddm(train_ddm_id)
+            self.valid_ddm = self.get_ddm(valid_ddm_id)
+            self.test_ddm = self.get_ddm(test_ddm_id)
+            self.apply_preprocess()
+            
+            if self.cache_dataset:
+                # cache the dataset for future use
+                self.dataset_cache[dataset_id] \
+                    = (self.train_ddm, self.valid_ddm, self.test_ddm)
+            
+        self.monitoring_dataset = {'train': self.train_ddm}
+        
+        self.nvis = self.train_ddm.get_design_matrix().shape[1]
+        self.nout = self.train_ddm.get_targets().shape[1]
+        self.ntrain = self.train_ddm.get_design_matrix().shape[0]
+        self.nvalid = self.valid_ddm.get_design_matrix().shape[0]
+        self.ntest = 0
+        if self.test_ddm is not None:
+            self.ntest = self.test_ddm.get_design_matrix().shape[0]
+        
+        print "nvis, nout :", self.nvis, self.nout
+        print "ntrain :", self.ntrain
+        print "nvalid :", self.nvalid
+        
+    def get_ddm(self, ddm_id):
+        if ddm_id is None:
+            return None
+        ddm_class = self.select_ddm(ddm_id)
+        if ddm_class == 'cifar100':
+            (which_set, center, gcn, toronto_prepro, axes_char, start, \
+                stop, one_hot) = self.select_ddm_cifar100(ddm_id)
+            axes = self.get_axes(axes_char)
+            return CIFAR100(which_set=which_set,center=center,
+                        gcn=gcn,toronto_prepro=toronto_prepro,axes=axes,
+                        start=start,stop=stop,one_hot=one_hot)
+        elif ddm_class == 'generic':
+            # this should import and setup a dataset generically
+            raise NotImplementedError()
+        else:
+            raise HPSData("dataset class not supported:"+str(ddm_class))
+            
+    def load_preprocessor(self, preprocess_array):
+        if preprocess_array is None:
+            return None
+        preprocess_list = []
+        for preprocess_id in preprocess_array:
+            preprocess_class = self.select_preprocess(preprocess_id)
+            if preprocess_class == 'standardize':
+                (global_mean, global_std, std_eps) \
+                    =  self.select_preprocess_standardize(preprocess_id)
+                preprocess_list.append(
+                    pp.Standardize(
+                        global_mean=global_mean, global_std=global_std, 
+                        std_eps=std_eps
+                    )
+                )
+            elif preprocess_class == 'zca':
+                (n_components, n_drop_components, filter_bias) \
+                    =  self.select_preprocess_zca(preprocess_id)
+                preprocess_list.append(
+                    pp.ZCA(
+                        n_components=n_components,
+                        n_drop_components=n_drop_components,
+                        filter_bias=filter_bias
+                    )
+                )
+            elif preprocess_class == 'gcn':
+                (subtract_mean, std_bias, use_norm) \
+                    =  self.select_preprocess_gcn(preprocess_id)
+                preprocess_list.append(
+                    pp.GlobalContrastNormalization(
+                        subtract_mean=subtract_mean,
+                        std_bias=std_bias, use_norm=use_norm
+                    )
+                )
+            else:
+                raise HPSData("preprocess class not supported:" \
+                    +str(preprocess_class))
+        
+        if len(preprocess_list) > 1:
+            preprocessor = pp.Pipeline(preprocess_list)
+        else:
+            preprocessor = preprocess_list[0]
+        self.preprocessor = preprocessor
+        
     def get_trainingAlgorithm(self, config_id, config_class, cost):
         if 'sgd' in config_class:
             (learning_rate,batch_size,init_momentum,train_iteration_mode) \
@@ -291,11 +432,24 @@ class HPS:
                         train_iteration_mode=train_iteration_mode) 
         else:
             raise HPSData("training class not supported:"+str(config_class))
+            
+    def get_cost(self, config_id, config_class):
+        fn = getattr(self, 'get_cost_'+cost_class)
+        return fn(self, layer_id)
+        if 'mlp' in config_class:
+            weight_decay = self.get_cost_weightdecay(config_id)
+            if weight_decay is not None:
+                costs.append(WeightDecay(coeffs=weight_decay))        
+        if len(costs) > 1:
+            return SumOfCosts(costs)
+        else:
+            return costs[0]
+ 
     def get_model(self, config_id, config_class):
         if 'mlp' in config_class:
             (layer_array,batch_size,input_space_id,dropout_include_probs,
                 dropout_scales,dropout_input_include_prob,
-                 dropout_input_scale,weight_decay,nvis) \
+                 dropout_input_scale,nvis) \
                     = self.select_model_mlp(config_id)
             input_space = None
             self.topo_view = False
@@ -322,100 +476,29 @@ class HPS:
                         dropout_input_include_prob=dropout_input_include_prob,
                         dropout_input_scale=dropout_input_scale)   
             print 'mlp is built'
-            return (weight_decay, model, batch_size)
+            return (model, batch_size)
+            
     def get_layer(self, layer_id):
         """Creates a Layer instance from its definition in the database."""
         (layer_class, layer_name) = self.select_layer(layer_id)
-        if layer_class == 'maxout':
-            (num_units,num_pieces,pool_stride,randomize_pools,irange,
-                 sparse_init,sparse_stdev,include_prob,init_bias,W_lr_scale,
-                 b_lr_scale,max_col_norm, max_row_norm) \
-                     = self.select_layer_maxout(layer_id)
-            return Maxout(num_units=num_units,num_pieces=num_pieces,
-                           pool_stride=pool_stride,layer_name=layer_name,
-                           randomize_pools=randomize_pools,
-                           irange=irange,sparse_init=sparse_init,
-                           sparse_stdev=sparse_stdev,
-                           include_prob=include_prob,
-                           init_bias=init_bias,W_lr_scale=W_lr_scale, 
-                           b_lr_scale=b_lr_scale,max_col_norm=max_col_norm,
-                           max_row_norm=max_row_norm)
-        elif layer_class == 'softmax':
-            (n_classes,irange,istdev,sparse_init,W_lr_scale,b_lr_scale, 
-                 max_row_norm,no_affine,max_col_norm) \
-                     = self.select_layer_softmax(layer_id) 
-            return Softmax(n_classes=n_classes,irange=irange,istdev=istdev,
-                            sparse_init=sparse_init,W_lr_scale=W_lr_scale,
-                            b_lr_scale=b_lr_scale,max_row_norm=max_row_norm,
-                            no_affine=no_affine,max_col_norm=max_col_norm,
-                            layer_name=layer_name)
-        elif layer_class == 'rectifiedlinear':
-            (dim,irange,istdev,sparse_init,sparse_stdev,include_prob,
-                init_bias,W_lr_scale,b_lr_scale,left_slope,max_row_norm,
-                max_col_norm,use_bias)\
-                    = self.select_layer_rectifiedlinear(layer_id)
-            return RectifiedLinear(dim=dim,irange=irange,istdev=istdev,
-                                    sparse_init=sparse_init,
-                                    sparse_stdev=sparse_stdev,
-                                    include_prob=include_prob,
-                                    init_bias=init_bias,
-                                    W_lr_scale=W_lr_scale,
-                                    b_lr_scale=b_lr_scale,
-                                    left_slope=left_slope,
-                                    max_row_norm=max_row_norm,
-                                    max_col_norm=max_col_norm,
-                                    use_bias=use_bias,
-                                    layer_name=layer_name)
-        elif layer_class == 'convrectifiedlinear':
-            (output_channels,kernel_width,pool_width,pool_stride,irange,
-                border_mode,sparse_init,include_prob,init_bias,W_lr_scale,
-                b_lr_scale,left_slope,max_kernel_norm) \
-                    = self.select_layer_convrectifiedlinear(layer_id) 
-            return ConvRectifiedLinear(output_channels=output_channels,
-                        kernel_shape=(kernel_width, kernel_width),
-                        pool_shape=(pool_width, pool_width),
-                        pool_stride=(pool_stride, pool_stride),
-                        layer_name=layer_name, irange=irange,
-                        border_mode=border_mode,sparse_init=sparse_init,
-                        include_prob=include_prob,init_bias=init_bias,
-                        W_lr_scale=W_lr_scale,b_lr_scale=b_lr_scale,
-                        left_slope=left_slope,
-                        max_kernel_norm=max_kernel_norm)
-        elif layer_class == 'maxoutconvc01b':
-            (num_channels,num_pieces,kernel_width,pool_width,pool_stride,
-                irange	,init_bias,W_lr_scale,b_lr_scale,pad,fix_pool_shape,
-                fix_pool_stride,fix_kernel_shape,partial_sum,tied_b,
-                max_kernel_norm,input_normalization,output_normalization) \
-                    = self.select_layer_maxoutConvC01B(layer_id) 
-            return MaxoutConvC01B(layer_name=layer_name,
-                                  num_channels=num_channels,
-                                  num_pieces=num_pieces,
-                                  kernel_shape=(kernel_width,kernel_width),
-                                  pool_shape=(pool_width, pool_width),
-                                  pool_stride=(pool_stride,pool_stride),
-                                  irange=irange,init_bias=init_bias,
-                                  W_lr_scale=W_lr_scale,
-                                  b_lr_scale=b_lr_scale,pad=pad,
-                                  fix_pool_shape=fix_pool_shape,
-                                  fix_pool_stride=fix_pool_stride,
-                                  fix_kernel_shape=fix_kernel_shape,
-                                  partial_sum=partial_sum,tied_b=tied_b,
-                                  max_kernel_norm=max_kernel_norm,
-                                  input_normalization=input_normalization,
-                                  output_normalization=output_normalization)
-        elif layer_class == 'sigmoid':
-            (dim,irange,istdev,sparse_init,sparse_stdev,include_prob,init_bias,
-                W_lr_scale,b_lr_scale,max_col_norm,max_row_norm) \
-                    = self.select_layer_sigmoid(layer_id)
-            return Sigmoid(layer_name=layer_name,dim=dim,irange=irange,
-                           istdev=istdev,
-                           sparse_init=sparse_init,sparse_stdev=sparse_stdev,
-                           include_prob=include_prob,init_bias=init_bias,
-                           W_lr_scale=W_lr_scale,b_lr_scale=b_lr_scale,
-                           max_col_norm=max_col_norm,
-                           max_row_norm=max_row_norm)
+        fn = getattr(self, 'get_layer_'+layer_class)
+        return fn(self, layer_id)
+        #raise HPSData("Layer class not supported:"+str(layer_class))
+            
+    def get_gater(self, gater_id):
+        gater_class = self.select_gater(gater_id)
+        if gater_class == 'kmeans':
+            (irange, gating_protocol, stochastic_masking, 
+                distribution_function, W_lr_scale) \
+                    = self.select_gater_kmeans(gater_id)
+            return KmeansGater(irange=irange, 
+                            gating_protocol=gating_protocol, 
+                            stochastic_masking=stochastic_masking, 
+                            distribution_function=distribution_function, 
+                            W_lr_scale=W_lr_scale)
         else:
-            assert False
+            raise HPSData("Gater class not supported:"+str(gater_class))
+            
     def get_termination(self, config_id, config_class):
         terminations = []
         if 'epochcounter' in config_class:
@@ -437,20 +520,24 @@ class HPS:
         elif len(terminations) == 0:
             return None
         return terminations[0]
+        
+    def get_axes(self, axes_char):
+        if axes_char == 'b01c':
+            return ('b', 0, 1, 'c')
+        elif axes_char == 'c01b':
+            return ('c', 0, 1, 'b')
+            
     def get_space(self, space_id):
         space_class = self.select_space(space_id)
         if space_class == 'conv2dspace':
             (num_row, num_column, num_channels, axes_char) \
                 = self.select_space_conv2DSpace(space_id)
-            if axes_char == 'b01c':
-                axes = ('b', 0, 1, 'c')
-            elif axes_char == 'c01b':
-                axes = ('c', 0, 1, 'b')
-            print axes
+            axes = self.get_axes(axes_char)
             return Conv2DSpace(shape=(num_row, num_column), 
                                num_channels=num_channels, axes=axes)
         else:
             raise HPSData("Space class not supported:"+str(space_class))
+            
     def get_extensions(self, ext_array, config_id):
         if ext_array is None:
             return []
@@ -491,6 +578,7 @@ class HPS:
             HPSLog(self.log_channel_names, self.db, config_id)
         )
         return extensions
+        
     def select_train_sgd(self, config_id):
         row = self.db.executeSQL("""
         SELECT learning_rate,batch_size,init_momentum,train_iteration_mode
@@ -501,6 +589,7 @@ class HPS:
             raise HPSData("No stochasticGradientDescent for config_id=" \
                 +str(config_id))
         return row
+        
     def set_end_time(self, config_id):
         return self.db.executeSQL("""
         UPDATE hps2.config 
@@ -512,6 +601,25 @@ class HPS:
         INSERT INTO hps2.validation_accuracy (config_id, accuracy)
         VALUES (%s, %s)
         """, (config_id, accuracy), self.db.COMMIT)  
+    def select_gater(self, gater_id):
+        row = self.db.executeSQL("""
+        SELECT gater_class
+        FROM hps2.gater
+        WHERE gater_id = %s
+        """, (gater_id,), self.db.FETCH_ONE)
+        if not row or row is None:
+            raise HPSData("No gater for gater_id="+str(gater_id))
+        return row[0]
+    def select_gater_kmeans(self, gater_id):
+        row = self.db.executeSQL("""
+        SELECT  irange, gating_protocol, stochastic_masking, 
+                distribution_function, W_lr_scale
+        FROM hps2.gater_kmeans
+        WHERE gater_id = %s
+        """, (gater_id,), self.db.FETCH_ONE)
+        if not row or row is None:
+            raise HPSData("No gater_kmeans for gater_id="+str(gater_id))
+        return row
     def select_space(self, space_id):
         row = self.db.executeSQL("""
         SELECT space_class
@@ -566,7 +674,8 @@ class HPS:
             c.execute("""
             BEGIN;
     
-            SELECT config_id,config_class,random_seed,ext_array
+            SELECT  config_id,config_class,random_seed,ext_array,
+                    dataset_id
             FROM hps2.config 
             WHERE start_time IS NULL AND task_id = %s
             LIMIT 1 FOR UPDATE;
@@ -579,15 +688,15 @@ class HPS:
         if not row or row is None:
             raise HPSData("No more configurations for task_id=" \
                 +str(self.task_id)+" "+row)
-        (config_id,config_class,random_seed,ext_array) = row
+        (config_id,config_class,random_seed,ext_array,dataset_id) = row
         c.execute("""
         UPDATE hps2.config
-        SET start_time = now() 
+        SET start_time = now(), worker_name = %s
         WHERE config_id = %s;
-        """, (config_id,))
+        """, (self.worker_name, config_id,))
         self.db.conn.commit()
         c.close()
-        return (config_id,config_class,random_seed,ext_array)
+        return (config_id,config_class,random_seed,ext_array,dataset_id)
     def select_config(self, config_id):
         row = None
         for i in xrange(10):
@@ -595,7 +704,8 @@ class HPS:
             c.execute("""
             BEGIN;
     
-            SELECT config_id,config_class,random_seed,ext_array
+            SELECT  config_id,config_class,random_seed,ext_array,
+                    dataset_id
             FROM hps2.config 
             WHERE config_id = %s 
             LIMIT 1 FOR UPDATE;
@@ -608,26 +718,35 @@ class HPS:
         if not row or row is None:
             raise HPSData("No more configurations for config_id=" \
                 +str(config_id)+", row:"+str(row))
-        (config_id,config_class,random_seed,ext_array) = row
+        (config_id,config_class,random_seed,ext_array,dataset_id) = row
         c.execute("""
         UPDATE hps2.config
-        SET start_time = now() 
+        SET start_time = now(), worker_name = %s
         WHERE config_id = %s;
-        """, (config_id,))
+        """, (self.worker_name, config_id,))
         self.db.conn.commit()
         c.close()
-        return (config_id,config_class,random_seed,ext_array)
+        return (config_id,config_class,random_seed,ext_array,dataset_id)
     def select_model_mlp(self, config_id):
         row = self.db.executeSQL("""
         SELECT  layer_array,batch_size,input_space_id,dropout_include_probs,
                 dropout_scales,dropout_input_include_prob,
-                 dropout_input_scale,weight_decay,nvis		
+                dropout_input_scale,nvis		
         FROM hps2.model_mlp
         WHERE config_id = %s
         """, (config_id,), self.db.FETCH_ONE)
         if not row or row is None:
             raise HPSData("No model mlp for config_id="+str(config_id))
         return row
+    def get_cost_weightdecay(self, config_id):
+        row = self.db.executeSQL("""
+        SELECT weight_decay		
+        FROM hps2.model_mlp
+        WHERE config_id = %s
+        """, (config_id,), self.db.FETCH_ONE)
+        if not row or row is None:
+            raise HPSData("No cost weightdecay for config_id="+str(config_id))
+        return row[0]
     def select_layer(self, layer_id):
         row = self.db.executeSQL("""
         SELECT layer_class, layer_name
@@ -637,7 +756,7 @@ class HPS:
         if not row or row is None:
             raise HPSData("No layer for layer_id="+str(layer_id))
         return row
-    def select_layer_maxout(self, layer_id):
+    def get_layer_maxout(self, layer_id):
         row = self.db.executeSQL("""
         SELECT   num_units,num_pieces,pool_stride,randomize_pools,irange,
                  sparse_init,sparse_stdev,include_prob,init_bias,W_lr_scale,
@@ -647,8 +766,21 @@ class HPS:
         """, (layer_id,), self.db.FETCH_ONE)
         if not row or row is None:
             raise HPSData("No maxout layer for layer_id="+str(layer_id))
-        return row
-    def select_layer_softmax(self, layer_id):
+        (num_units,num_pieces,pool_stride,randomize_pools,irange,
+             sparse_init,sparse_stdev,include_prob,init_bias,W_lr_scale,
+             b_lr_scale,max_col_norm, max_row_norm) \
+                 = row
+        return Maxout(num_units=num_units,num_pieces=num_pieces,
+                       pool_stride=pool_stride,layer_name=layer_name,
+                       randomize_pools=randomize_pools,
+                       irange=irange,sparse_init=sparse_init,
+                       sparse_stdev=sparse_stdev,
+                       include_prob=include_prob,
+                       init_bias=init_bias,W_lr_scale=W_lr_scale, 
+                       b_lr_scale=b_lr_scale,max_col_norm=max_col_norm,
+                       max_row_norm=max_row_norm)
+                       
+    def get_layer_softmax(self, layer_id):
         row = self.db.executeSQL("""
         SELECT  n_classes,irange,istdev,sparse_init,W_lr_scale,b_lr_scale, 
                 max_row_norm,no_affine,max_col_norm
@@ -657,8 +789,15 @@ class HPS:
         """, (layer_id,), self.db.FETCH_ONE)
         if not row or row is None:
             raise HPSData("No softmax layer for layer_id="+str(layer_id))
-        return row
-    def select_layer_rectifiedlinear(self, layer_id):
+        (n_classes,irange,istdev,sparse_init,W_lr_scale,b_lr_scale, 
+             max_row_norm,no_affine,max_col_norm) = row
+        return Softmax(n_classes=n_classes,irange=irange,istdev=istdev,
+                        sparse_init=sparse_init,W_lr_scale=W_lr_scale,
+                        b_lr_scale=b_lr_scale,max_row_norm=max_row_norm,
+                        no_affine=no_affine,max_col_norm=max_col_norm,
+                        layer_name=layer_name)
+                        
+    def get_layer_rectifiedlinear(self, layer_id):
         row = self.db.executeSQL("""
         SELECT  dim,irange,istdev,sparse_init,sparse_stdev,include_prob,
                 init_bias,W_lr_scale,b_lr_scale,left_slope,max_row_norm,
@@ -669,8 +808,39 @@ class HPS:
         if not row or row is None:
             raise HPSData("No rectifiedlinear layer for layer_id="\
                 +str(layer_id))
-        return row
-    def select_layer_convrectifiedlinear(self, layer_id):
+        (dim,irange,istdev,sparse_init,sparse_stdev,include_prob,
+            init_bias,W_lr_scale,b_lr_scale,left_slope,max_row_norm,
+            max_col_norm,use_bias) = row
+        return RectifiedLinear(dim=dim,irange=irange,istdev=istdev,
+                sparse_init=sparse_init,sparse_stdev=sparse_stdev,
+                include_prob=include_prob,init_bias=init_bias,
+                W_lr_scale=W_lr_scale,b_lr_scale=b_lr_scale,
+                left_slope=left_slope,max_row_norm=max_row_norm,
+                max_col_norm=max_col_norm,use_bias=use_bias,
+                layer_name=layer_name)
+                                
+    def get_layer_linear(self, layer_id):
+        row = self.db.executeSQL("""
+        SELECT  dim,irange,istdev,sparse_init,sparse_stdev,include_prob,
+                init_bias,W_lr_scale,b_lr_scale,max_row_norm,
+                max_col_norm,softmax_columns
+        FROM hps2.layer_linear
+        WHERE layer_id = %s
+        """, (layer_id,), self.db.FETCH_ONE)
+        if not row or row is None:
+            raise HPSData("No linear layer for layer_id="\
+                +str(layer_id))
+        (dim,irange,istdev,sparse_init,sparse_stdev,include_prob,
+            init_bias,W_lr_scale,b_lr_scale,max_row_norm,
+            max_col_norm,softmax_columns) = row
+        return Linear(dim=dim,irange=irange,istdev=istdev,
+                sparse_init=sparse_init,sparse_stdev=sparse_stdev,
+                include_prob=include_prob,init_bias=init_bias,
+                W_lr_scale=W_lr_scale,b_lr_scale=b_lr_scale,
+                max_row_norm=max_row_norm,max_col_norm=max_col_norm,
+                layer_name=layer_name,softmax_columns=softmax_columns)
+                
+    def get_layer_convrectifiedlinear(self, layer_id):
         row = self.db.executeSQL("""
         SELECT  output_channels,kernel_width,pool_width,pool_stride,irange,
                 border_mode,sparse_init,include_prob,init_bias,W_lr_scale,
@@ -681,11 +851,48 @@ class HPS:
         if not row or row is None:
             raise HPSData("No convrectifiedlinear layer for layer_id=" \
                 +str(layer_id))
-        return row
-    def select_layer_maxoutConvC01B(self, layer_id):
+        (output_channels,kernel_width,pool_width,pool_stride,irange,
+            border_mode,sparse_init,include_prob,init_bias,W_lr_scale,
+            b_lr_scale,left_slope,max_kernel_norm) = row
+        return ConvRectifiedLinear(output_channels=output_channels,
+                kernel_shape=(kernel_width, kernel_width),
+                pool_shape=(pool_width, pool_width),
+                pool_stride=(pool_stride, pool_stride),
+                layer_name=layer_name, irange=irange,
+                border_mode=border_mode,sparse_init=sparse_init,
+                include_prob=include_prob,init_bias=init_bias,
+                W_lr_scale=W_lr_scale,b_lr_scale=b_lr_scale,
+                left_slope=left_slope,max_kernel_norm=max_kernel_norm)
+                
+    def get_layer_convolution(self, layer_id):
+        row = self.db.executeSQL("""
+        SELECT  output_channels,kernel_width,pool_width,pool_stride,irange,
+                border_mode,sparse_init,include_prob,init_bias,W_lr_scale,
+                b_lr_scale,max_kernel_norm,activation_function
+        FROM hps2.layer_convolution
+        WHERE layer_id = %s
+        """, (layer_id,), self.db.FETCH_ONE)
+        if not row or row is None:
+            raise HPSData("No convolution layer for layer_id=" \
+                +str(layer_id))
+        (output_channels,kernel_width,pool_width,pool_stride,irange,
+            border_mode,sparse_init,include_prob,init_bias,W_lr_scale,
+            b_lr_scale,max_kernel_norm,activation_function) = row
+        return Convolution(output_channels=output_channels,
+                kernel_shape=(kernel_width, kernel_width),
+                activation_function=activation_function,
+                pool_shape=(pool_width, pool_width),
+                pool_stride=(pool_stride, pool_stride),
+                layer_name=layer_name, irange=irange,
+                border_mode=border_mode,sparse_init=sparse_init,
+                include_prob=include_prob,init_bias=init_bias,
+                W_lr_scale=W_lr_scale,b_lr_scale=b_lr_scale,
+                max_kernel_norm=max_kernel_norm)
+                    
+    def get_layer_maxoutconvc01b(self, layer_id):
         row = self.db.executeSQL("""
         SELECT  num_channels,num_pieces,kernel_width,pool_width,pool_stride,
-                irange	,init_bias,W_lr_scale,b_lr_scale,pad,fix_pool_shape,
+                irange,init_bias,W_lr_scale,b_lr_scale,pad,fix_pool_shape,
                 fix_pool_stride,fix_kernel_shape,partial_sum,tied_b,
                 max_kernel_norm,input_normalization,output_normalization
         FROM hps2.layer_maxoutConvC01B
@@ -694,8 +901,27 @@ class HPS:
         if not row or row is None:
             raise HPSData("No maxoutConvC01B layer for layer_id=" \
                 +str(layer_id))
-        return row
-    def select_layer_sigmoid(self, layer_id):
+        (num_channels,num_pieces,kernel_width,pool_width,pool_stride,
+            irange	,init_bias,W_lr_scale,b_lr_scale,pad,fix_pool_shape,
+            fix_pool_stride,fix_kernel_shape,partial_sum,tied_b,
+            max_kernel_norm,input_normalization,output_normalization) \
+                = self.select_layer_maxoutConvC01B(layer_id) 
+        return MaxoutConvC01B(layer_name=layer_name,
+                num_channels=num_channels,num_pieces=num_pieces,
+                kernel_shape=(kernel_width,kernel_width),
+                pool_shape=(pool_width, pool_width),
+                pool_stride=(pool_stride,pool_stride),
+                irange=irange,init_bias=init_bias,
+                W_lr_scale=W_lr_scale,b_lr_scale=b_lr_scale,pad=pad,
+                fix_pool_shape=fix_pool_shape,
+                fix_pool_stride=fix_pool_stride,
+                fix_kernel_shape=fix_kernel_shape,
+                partial_sum=partial_sum,tied_b=tied_b,
+                max_kernel_norm=max_kernel_norm,
+                input_normalization=input_normalization,
+                output_normalization=output_normalization)
+                              
+    def get_layer_sigmoid(self, layer_id):
         row = self.db.executeSQL("""
         SELECT  dim,irange,istdev,sparse_init,sparse_stdev,include_prob,init_bias,
                 W_lr_scale,b_lr_scale,max_col_norm,max_row_norm
@@ -705,7 +931,44 @@ class HPS:
         if not row or row is None:
             raise HPSData("No sigmoid layer for layer_id=" \
                 +str(layer_id))
-        return row
+        (dim,irange,istdev,sparse_init,sparse_stdev,include_prob,init_bias,
+            W_lr_scale,b_lr_scale,max_col_norm,max_row_norm) = row
+        return Sigmoid(layer_name=layer_name,dim=dim,irange=irange,
+                istdev=istdev,sparse_init=sparse_init,
+                sparse_stdev=sparse_stdev, include_prob=include_prob,
+                init_bias=init_bias,W_lr_scale=W_lr_scale,
+                b_lr_scale=b_lr_scale,max_col_norm=max_col_norm,
+                max_row_norm=max_row_norm)
+                
+    def get_layer_starmixture(self, layer_id):
+        row = self.db.executeSQL("""
+        SELECT  dim, num_experts, expert_dim, gater_id, 
+                expert_activation, output_activation, cost_function,
+                irange, istdev, sparse_init, sparse_stdev, init_bias,
+                W_lr_scale, b_lr_scale, max_col_norm0, max_col_norm1,
+                use_bias
+        FROM hps2.layer_starmixture
+        WHERE layer_id = %s
+        """, (layer_id,), self.db.FETCH_ONE)
+        if not row or row is None:
+            raise HPSData("No starmixture layer for layer_id=" \
+                +str(layer_id))
+        (dim, num_experts, expert_dim, gater_id, 
+            expert_activation, output_activation, cost_function,
+            irange, istdev, sparse_init, sparse_stdev, init_bias,
+            W_lr_scale, b_lr_scale, max_col_norm0, max_col_norm1,
+            use_bias) = row
+        gater = self.get_gater(gater_id)
+        return StarMixture(layer_name=layer_name, dim=dim, 
+            num_experts=num_experts, expert_dim=expert_dim, 
+            gater=gater, expert_activation=expert_activation, 
+            output_activation=output_activation, irange=irange,
+            cost_function=cost_function, istdev=istdev, 
+            sparse_init=sparse_init, sparse_stdev=sparse_stdev, 
+            init_bias=init_bias, W_lr_scale=W_lr_scale, 
+            b_lr_scale=b_lr_scale, use_bias=use_bias,
+            max_col_norm=(max_col_norm0, max_col_norm1))
+            
     def select_term_epochCounter(self, config_id):
         row = self.db.executeSQL("""
         SELECT ec_max_epoch
@@ -728,7 +991,91 @@ class HPS:
         return row
     def select_preprocess(self, preprocess_id):
         row =  self.db.executeSQL("""
-        SELECT dataset_desc, dataset_nvis
+        SELECT preprocess_class
+        FROM hps2.preprocess
+        WHERE preprocess_id = %s
+        """, (preprocess_id,), self.db.FETCH_ONE)
+        if not row or row is None:
+            raise HPSData("No preprocess for preprocess_id="\
+                +str(preprocess_id))
+        return row[0]
+    def select_preprocess_standardize(self, preprocess_id):
+        row =  self.db.executeSQL("""
+        SELECT global_mean, global_std, std_eps	
+        FROM hps2.preprocess_standardize
+        WHERE preprocess_id = %s
+        """, (preprocess_id,), self.db.FETCH_ONE)
+        if not row or row is None:
+            raise HPSData("No standardize preprocess for preprocess_id="\
+                +str(preprocess_id))
+        return row
+    def select_preprocess_zca(self, preprocess_id):
+        row =  self.db.executeSQL("""
+        SELECT n_components, n_drop_components, filter_bias
+        FROM hps2.preprocess_zca
+        WHERE preprocess_id = %s
+        """, (preprocess_id,), self.db.FETCH_ONE)
+        if not row or row is None:
+            raise HPSData("No zca preprocess for preprocess_id="\
+                +str(preprocess_id))
+        return row
+    def select_preprocess_gcn(self, preprocess_id):
+        row =  self.db.executeSQL("""
+        SELECT subtract_mean, std_bias, use_norm
+        FROM hps2.preprocess_gcn
+        WHERE preprocess_id = %s
+        """, (preprocess_id,), self.db.FETCH_ONE)
+        if not row or row is None:
+            raise HPSData("No gcn preprocess for preprocess_id="\
+                +str(preprocess_id))
+        return row
+    def select_dataset(self, dataset_id):
+        row =  self.db.executeSQL("""
+        SELECT preprocess_array,train_ddm_id,valid_ddm_id,test_ddm_id
         FROM hps2.dataset
         WHERE dataset_id = %s
-        """, (preprocess_id,), self.db.FETCH_ONE)
+        """, (dataset_id,), self.db.FETCH_ONE)
+        if not row or row is None:
+            raise HPSData("No dataset for dataset_id="\
+                +str(dataset_id))
+        return row
+    def select_ddm(self, ddm_id):
+        row =  self.db.executeSQL("""
+        SELECT ddm_class
+        FROM hps2.ddm
+        WHERE ddm_id = %s
+        """, (ddm_id,), self.db.FETCH_ONE)
+        if not row or row is None:
+            raise HPSData("No ddm for ddm_id=" +str(ddm_id))
+        return row[0]
+    def select_ddm_cifar100(self, ddm_id):
+        row =  self.db.executeSQL("""
+        SELECT  which_set, center, gcn, toronto_prepro, axes,
+                start, stop, one_hot
+        FROM hps2.ddm_cifar100
+        WHERE ddm_id = %s
+        """, (ddm_id,), self.db.FETCH_ONE)
+        if not row or row is None:
+            raise HPSData("No cifar100 ddm for ddm_id="\
+                +str(ddm_id))
+        return row
+
+if __name__ == '__main__':
+    worker_name = str(sys.argv[1])
+    task_id = int(sys.argv[2])
+    start_config_id = None
+    if len(sys.argv) > 3:
+        start_config_id = int(sys.argv[3])
+    log_channel_names = ['train_objective',
+                        'Validation Classification Accuracy',
+                        'Test Classification Accuracy',
+                        'train_gater_cost']
+    mbsb_channel_name = 'Validation Missclassification'
+    hps = HPS(task_id=task_id, log_channel_names=log_channel_names,
+              mbsb_channel_name=mbsb_channel_name, 
+              worker_name=worker_name )
+    hps.run(start_config_id)
+    if len(sys.argv) < 2:
+        print """
+        Usage: python hps2.py "worker_name" "task_id" ["config_id"]
+        """

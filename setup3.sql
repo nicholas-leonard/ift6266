@@ -108,6 +108,12 @@ CREATE TABLE hps3.space_conv2DSpace(
 	PRIMARY KEY (space_id)
 ) INHERITS (hps3.space);
 
+--DROP TABLE hps3.space_vector CASCADE;
+CREATE TABLE hps3.space_vector (
+	dim		INT4 NOT NULL,
+	sparse		BOOLEAN DEFAULT FALSE,
+	PRIMARY KEY (space_id)
+) INHERITS (hps3.space);
   
   
 /* Extensions */
@@ -385,4 +391,40 @@ CREATE TABLE hps3.preprocess_gcn (
 	PRIMARY KEY (preprocess_id)
 ) INHERITS (hps3.preprocess);
 
+/* Functions */
 
+
+CREATE OR REPLACE FUNCTION hps3.get_best(config_id INT4, channel_name VARCHAR(1000)) 
+RETURNS TABLE (epoch INT4, value FLOAT4, rank INT4) AS $$
+	SELECT epoch_count, channel_value, rank::INT4
+	FROM	(
+		SELECT config_id, epoch_count, channel_value, rank()
+			OVER (PARTITION BY config_id ORDER BY channel_value DESC, epoch_count ASC)
+		FROM hps3.training_log
+		WHERE channel_name = $2 AND config_id = $1
+		) AS a
+$$ LANGUAGE SQL;
+
+CREATE OR REPLACE FUNCTION hps3.get_channel(config_id INT4, channel_name VARCHAR(1000), epoch INT4) 
+RETURNS FLOAT4 AS $$
+	SELECT channel_value
+	FROM hps3.training_log
+	WHERE channel_name = $2 AND config_id = $1 AND epoch_count = $3
+$$ LANGUAGE SQL;
+
+
+CREATE OR REPLACE FUNCTION hps3.get_last(config_id INT4, channel_name VARCHAR(1000)) 
+RETURNS FLOAT4 AS $$
+	SELECT channel_value
+	FROM hps3.training_log
+	WHERE channel_name = $2 AND config_id = $1
+	ORDER BY epoch_count DESC LIMIT 1
+$$ LANGUAGE SQL;
+
+
+CREATE OR REPLACE FUNCTION hps3.get_end(config_id INT4) 
+RETURNS INT4 AS $$
+	SELECT MAX(epoch_count)
+	FROM hps3.training_log
+	WHERE config_id = $1
+$$ LANGUAGE SQL;

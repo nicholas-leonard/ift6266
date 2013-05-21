@@ -14,6 +14,8 @@ from collections import OrderedDict
 from pylearn2.utils import safe_union
 
 import numpy as np
+import scipy.sparse as spp
+import theano.sparse as S
 
 from theano.gof.op import get_debug_values
 from theano.printing import Print
@@ -49,6 +51,18 @@ from pylearn2.datasets import preprocessing as pp
 from pylearn2.datasets.cifar100 import CIFAR100
 
 from database import DatabaseHandler
+
+"""
+TODO:
+    saves best model on disk. At end of experiment, saves best model
+        to database as blob.
+    refactor into its own repo/module/files
+    get_config is separate from load config for try/catch
+    reconnect to db on failure
+    log errors to db
+    spawn processes
+    debug option in OptionParser
+"""
 
 def batched_tensordot(x, y, axes=2):
     """
@@ -495,12 +509,6 @@ class ExponentialDecayOverEpoch(TrainExtension):
         new_lr = np.cast[config.floatX](new_lr)
         algorithm.learning_rate.set_value(new_lr)   
 
-"""
-TODO:
-    saves best model on disk. At end of experiment, saves best model
-        to database as blob.
-"""
-
 class HPSModelPersist(TrainExtension):
     pass
 
@@ -604,12 +612,12 @@ class HPS:
     def run(self, start_config_id = None):
         print 'running'
         while True:
+            (config_id, model, learner, algorithm) \
+                = self.get_config(start_config_id)
+            start_config_id = None
+            #learner.main_loop()
             try:   
-                (config_id, model, learner, algorithm) \
-                    = self.get_config(start_config_id)
-                start_config_id = None
                 print 'learning'
-                #learner.main_loop()
                 learner.main_loop()
             except Exception, e:
                 print e
@@ -696,7 +704,13 @@ class HPS:
                     )
         else:
             print "design view"
-            self.minibatch = T.as_tensor_variable(
+            batch = self.valid_ddm.get_batch_design(self.batch_size)
+            if isinstance(batch, spp.csr_matrix):
+                print "sparse2"
+                self.minibatch = self.model.get_input_space().make_batch_theano()
+                print type(self.minibatch)
+            else:
+                self.minibatch = T.as_tensor_variable(
                         self.valid_ddm.get_batch_design(self.batch_size), 
                         name='minibatch'
                     )
@@ -896,7 +910,9 @@ class HPS:
         self.input_include_probs = {}
         self.input_scales = {}
         self.weight_decay = False
+        self.weight_decays = {}
         self.l1_weight_decay = False
+        self.l1_weight_decays = {}
         
         row = self.db.executeSQL("""
         SELECT layer_array,input_space_id,batch_size,nvis		
@@ -1085,6 +1101,17 @@ class HPS:
         axes = self.get_axes(axes_char)
         return Conv2DSpace(shape=(num_row, num_column), 
                            num_channels=num_channels, axes=axes)
+    
+    def get_space_vector(self, space_id):
+        row = self.db.executeSQL("""
+        SELECT dim, sparse
+        FROM hps3.space_vector
+        WHERE space_id = %s
+        """, (space_id,), self.db.FETCH_ONE)
+        if not row or row is None:
+            raise HPSData("No vector for space_id="+str(space_id))
+        (dim, sparse) = row
+        return VectorSpace(dim=dim, sparse=sparse)
 
     def get_ext_exponentialdecayoverepoch(self, ext_id):
         row = self.db.executeSQL("""

@@ -83,6 +83,31 @@ INSERT INTO hps3.config_mlp_sgd (
 	FROM (SELECT unnest('{110,111,147,148,149}'::INT4[]) AS layer) AS a
 ) RETURNING config_id;--428-432
 
+/* More hiddens */
+
+0.001;"{81,81,147,113}"
+
+INSERT INTO hps3.layer_rectifiedlinear (layer_class, dim, sparse_init, init_bias, max_col_norm) (
+	SELECT 'rectifiedlinear', dim, 15, 0, Null
+	FROM (SELECT unnest('{6000,7000}'::INT4[]) AS dim) AS a
+)RETURNING layer_id;--251-252
+
+INSERT INTO hps3.config_mlp_sgd (
+	model_class,train_class,task_id,dataset_id,input_space_id,
+	ext_array,term_array,layer_array,cost_array,
+	batch_size,learning_rate, init_momentum, random_seed,description) (
+	SELECT 'mlp','sgd',14,5,2,
+		'{1,2}'::INT8[],'{1,2}'::INT8[],ARRAY[81,81,layer,113]::INT8[],'{7}'::INT8[],
+		8,0.001,0.5, random()*1000000 AS random_seed, 'from 420, more hiddens'
+	FROM (SELECT generate_series(148,149,1) AS layer) AS c
+	UNION ALL
+	SELECT 'mlp','sgd',14,5,2,
+		'{1,2}'::INT8[],'{1,2}'::INT8[],ARRAY[layer,113]::INT8[],'{7}'::INT8[],
+		8,0.001,0.5, random()*1000000 AS random_seed, 'mlp with multisoftmax'
+	FROM (SELECT generate_series(251,252,1) AS layer) AS c
+	ORDER BY random_seed
+) RETURNING config_id;--1043-1046
+
 --BEGIN; UPDATE hps3.config_mlp_sgd SET start_time=NULL,end_time=NULL,task_id=5 WHERE config_id BETWEEN 357 AND 360; COMMIT;
 /*BEGIN; UPDATE hps3.config_mlp_sgd_mb_ec_mix 
 SET ext_array = '{3}'::FLOAT4[], init_momentum=0
